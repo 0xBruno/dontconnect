@@ -1,5 +1,7 @@
-﻿using System.Net;
+﻿using Microsoft.Win32;
+using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace dontconnect
@@ -8,14 +10,32 @@ namespace dontconnect
     {
         private static IPAddress proxIP = IPAddress.Parse("127.0.0.1");
         private static int proxPort = 8080;
+
         private static List<string> BlockedDomains = new List<string>
         {
             "example.com",
             "0xbruno.dev"
         };
+        
+        // P/Invoke declarations for refreshing system settings
+        [System.Runtime.InteropServices.DllImport("wininet.dll", SetLastError = true)]
+        private static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
 
+        private const int INTERNET_OPTION_SETTINGS_CHANGED = 39;
+        private const int INTERNET_OPTION_REFRESH = 37;
+        
+        
         static async Task Main(string[] args)
         {
+            
+            SetSystemProxy(proxIP + ":" + proxPort.ToString());
+
+            // Register the cleanup action for program exit
+            AppDomain.CurrentDomain.ProcessExit += (sender, eventArgs) =>
+            {
+                DisableSystemProxy();
+            };
+
             TcpListener listener = new TcpListener(proxIP, proxPort);
             listener.Start();
 
@@ -26,6 +46,7 @@ namespace dontconnect
                 TcpClient client = await listener.AcceptTcpClientAsync();
                 _ = Task.Run(async () => { await HandleClientAsync(client); });
             }
+            
 
         }
 
@@ -39,7 +60,6 @@ namespace dontconnect
 
                 // Read the CONNECT request
                 string requestLine = await clientReader.ReadLineAsync();
-                Console.WriteLine($"Request received: {requestLine}");
 
                 if (requestLine.StartsWith("CONNECT"))
                 {
@@ -48,13 +68,12 @@ namespace dontconnect
                     string[] hostPort = requestParts[1].Split(':');
                     string targetHost = hostPort[0];
                     int targetPort = int.Parse(hostPort[1]);
-
-                    Console.WriteLine($"Connecting to {targetHost}:{targetPort}");
+                 
 
                     // Check if the host matches drop rule
                     if (BlockedDomains.Contains(targetHost.ToLower()))
                     {
-                        Console.WriteLine("Blocking access >:)");
+                        Console.WriteLine($"DROP: {requestLine}");                        
 
                         // Send 403 Forbidden response to the client
                         await clientWriter.WriteLineAsync("HTTP/1.1 403 Forbidden");
@@ -66,6 +85,7 @@ namespace dontconnect
                         return;
                     }
 
+                    Console.WriteLine($"ALLOW: {requestLine}");
                     try
                     {
                         // Connect to the target server
@@ -122,6 +142,71 @@ namespace dontconnect
             catch (IOException)
             {
                 // Handle disconnection
+            }
+        }
+
+
+        static void SetSystemProxy(string proxyAddress)
+        {
+            const string registryKey = @"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(registryKey, writable: true))
+                {
+                    if (key != null)
+                    {
+                        // Enable the proxy and set the address
+                        key.SetValue("ProxyEnable", 1);
+                        key.SetValue("ProxyServer", proxyAddress);
+
+                        // Notify the system of the changes
+                        InternetSetOption(IntPtr.Zero, INTERNET_OPTION_SETTINGS_CHANGED, IntPtr.Zero, 0);
+                        InternetSetOption(IntPtr.Zero, INTERNET_OPTION_REFRESH, IntPtr.Zero, 0);
+
+                        Console.WriteLine($"System proxy set to {proxyAddress}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("Error: Unable to access registry key.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error setting system proxy: {ex.Message}");
+            }
+        }
+
+        static void DisableSystemProxy()
+        {
+            const string registryKey = @"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(registryKey, writable: true))
+                {
+                    if (key != null)
+                    {
+                        // Disable the proxy and clear the address
+                        key.SetValue("ProxyEnable", 0);
+                        key.DeleteValue("ProxyServer", false);
+
+                        // Notify the system of the changes
+                        InternetSetOption(IntPtr.Zero, INTERNET_OPTION_SETTINGS_CHANGED, IntPtr.Zero, 0);
+                        InternetSetOption(IntPtr.Zero, INTERNET_OPTION_REFRESH, IntPtr.Zero, 0);
+
+                        Console.WriteLine("System proxy disabled.");
+                    }
+                    else
+                    {
+                        Console.WriteLine("Error: Unable to access registry key.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error disabling system proxy: {ex.Message}");
             }
         }
     }
